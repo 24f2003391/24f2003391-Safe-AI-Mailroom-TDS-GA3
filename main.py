@@ -422,7 +422,13 @@ async def propose(body: dict):
         async with batch_semaphore:
             try:
                 return await model_proposals(batch)
+            except httpx.HTTPStatusError as e:
+                # Log only the upstream status and a short response excerpt; never log request headers or API keys.
+                detail = (e.response.text or "")[:1000]
+                print(f"Model provider HTTP {e.response.status_code}: {detail}", flush=True)
+                raise RuntimeError(f"model decision unavailable or invalid: HTTP {e.response.status_code}")
             except Exception as e:
+                print(f"Model decision failed: {type(e).__name__}", flush=True)
                 raise RuntimeError(f"model decision unavailable or invalid: {type(e).__name__}")
 
     if batches:
