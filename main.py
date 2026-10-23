@@ -202,7 +202,8 @@ def verify_receipt(receipt: dict, evaluation_id: str, input_digest: str, jwk: di
     if not isinstance(signature, str):
         return False
     fields = {"dossierId", "callId", "action", "accepted", "proposalDigest", "receiptId"}
-    if not fields.issubset(receipt) or not isinstance(receipt.get("accepted"), bool):
+    # The signed inner receipt is the complete receipt object except receiptSignature.
+    if set(receipt) != fields | {"receiptSignature"} or not isinstance(receipt.get("accepted"), bool):
         return False
     if jwk.get("kty") != "OKP" or jwk.get("crv") != "Ed25519" or not isinstance(jwk.get("x"), str):
         return False
@@ -340,9 +341,12 @@ async def commit(body: dict):
         proposals = con.execute("SELECT * FROM proposals WHERE evaluation_id=?", (evaluation_id,)).fetchall()
         proposal_map = {p["dossier_id"]: p for p in proposals}
         jwk = json.loads(ev["verifier_jwk"])
-    receipt_ids = [r.get("dossierId") if isinstance(r, dict) else None for r in receipts]
-    if len(receipt_ids) != len(set(receipt_ids)) or set(receipt_ids) != set(proposal_map):
-        return fail(422, "receipts must cover every proposal exactly once")
+    receipt_dossier_ids = [r.get("dossierId") if isinstance(r, dict) else None for r in receipts]
+    receipt_nonces = [r.get("receiptId") if isinstance(r, dict) else None for r in receipts]
+    if (len(receipt_dossier_ids) != len(set(receipt_dossier_ids))
+            or set(receipt_dossier_ids) != set(proposal_map)
+            or None in receipt_nonces or len(receipt_nonces) != len(set(receipt_nonces))):
+        return fail(422, "receipts must cover every proposal exactly once with unique receipt IDs")
     # Verify every signature and every scope before persisting any outcome.
     outcomes = []
     for receipt in receipts:
