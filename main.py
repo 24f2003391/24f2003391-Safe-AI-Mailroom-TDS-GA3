@@ -323,10 +323,15 @@ async def propose(body: dict):
     for key in ("stableCount", "freshCount"):
         if not isinstance(corpus.get(key), int) or isinstance(corpus[key], bool) or corpus[key] < 0:
             raise ValueError("invalid corpus counts")
-    if not isinstance(allowed, list) or set(allowed) != ACTIONS or len(allowed) != len(ACTIONS):
+    if (not isinstance(allowed, list) or len(allowed) != len(ACTIONS)
+            or not all(isinstance(a, str) for a in allowed)
+            or set(allowed) != ACTIONS or len(set(allowed)) != len(allowed)):
         raise ValueError("allowedActions must contain each permitted action exactly once")
     if not all(validate_dossier(d) for d in dossiers):
         raise ValueError("malformed dossier schema")
+    if (sum(d["partition"] == "stable_core" for d in dossiers) != corpus["stableCount"]
+            or sum(d["partition"] == "fresh_audit" for d in dossiers) != corpus["freshCount"]):
+        raise ValueError("corpus counts do not match dossier partitions")
     ids = [d["dossierId"] for d in dossiers]
     if len(set(ids)) != len(ids):
         raise ValueError("duplicate dossier IDs")
@@ -385,6 +390,8 @@ async def propose(body: dict):
         "profile": PROFILE, "evaluationId": evaluation_id, "status": "awaiting_receipts",
         "inputDigest": input_digest, "proposals": proposals,
     }
+    if len(canonical(response)) > 512 * 1024:
+        return fail(413, "successful response would exceed 512 KiB")
     with db() as con:
         con.execute("BEGIN IMMEDIATE")
         existing = con.execute("SELECT * FROM evaluations WHERE evaluation_id=?", (evaluation_id,)).fetchone()
@@ -458,6 +465,8 @@ async def commit(body: dict):
         "profile": PROFILE, "evaluationId": evaluation_id, "status": "completed",
         "inputDigest": input_digest, "outcomes": outcomes,
     }
+    if len(canonical(response)) > 512 * 1024:
+        return fail(413, "successful response would exceed 512 KiB")
     with db() as con:
         con.execute("BEGIN IMMEDIATE")
         prior = con.execute("SELECT * FROM commits WHERE evaluation_id=?", (evaluation_id,)).fetchone()
