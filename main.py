@@ -25,8 +25,18 @@ ACTIONS = {
 MAX_BODY = 5 * 1024 * 1024
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DB_PATH = os.getenv("DATABASE_PATH", "mailroom.sqlite3")
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-API_KEY = os.getenv("OPENAI_API_KEY", "")
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "openai").strip().lower()
+if MODEL_PROVIDER == "gemini":
+    MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+    API_KEY = os.getenv("GEMINI_API_KEY", "")
+    MODEL_BASE_URL = os.getenv(
+        "GEMINI_BASE_URL",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+    )
+else:
+    MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    API_KEY = os.getenv("OPENAI_API_KEY", "")
+    MODEL_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
 app = FastAPI(title="Safe AI Mailroom", docs_url=None, redoc_url=None)
 
@@ -227,15 +237,18 @@ Use only exact fields, no extras. Evidence must be the smallest set of unique li
 
 
 async def model_proposals(dossiers: list[dict]) -> list[dict]:
+    if MODEL_PROVIDER not in {"openai", "gemini"}:
+        raise RuntimeError("MODEL_PROVIDER must be 'openai' or 'gemini'")
     if not API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
+        required_key = "GEMINI_API_KEY" if MODEL_PROVIDER == "gemini" else "OPENAI_API_KEY"
+        raise RuntimeError(f"{required_key} is not configured")
     prompt = {"dossiers": dossiers, "allowedActions": sorted(ACTIONS)}
     batch_system = SYSTEM_PROMPT + """
 For this request, you receive a list of dossiers. Return one JSON object with a single key "proposals", whose value is a list containing exactly one proposal per input dossier. Each proposal must have exactly dossierId, action, target, payload, evidence. Do not include callId; the server adds a stable callId. Preserve dossier IDs exactly and do not omit any dossier.
 """
     async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=5.0)) as client:
         response = await client.post(
-            "https://api.openai.com/v1/chat/completions",
+            f"{MODEL_BASE_URL.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
             json={
                 "model": MODEL,
@@ -310,6 +323,8 @@ async def health():
         "status": "ok",
         "profile": PROFILE,
         "database": "postgresql" if DATABASE_URL else "sqlite",
+        "modelProvider": MODEL_PROVIDER,
+        "model": MODEL,
     }
 
 
