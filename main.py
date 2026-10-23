@@ -23,7 +23,8 @@ ACTIONS = {
     "request_confirmation", "quarantine_item", "no_action",
 }
 MAX_BODY = 5 * 1024 * 1024
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()\nDB_PATH = os.getenv("DATABASE_PATH", "mailroom.sqlite3")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DB_PATH = os.getenv("DATABASE_PATH", "mailroom.sqlite3")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 API_KEY = os.getenv("OPENAI_API_KEY", "")
 
