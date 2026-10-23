@@ -27,7 +27,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DB_PATH = os.getenv("DATABASE_PATH", "mailroom.sqlite3")
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "openai").strip().lower()
 if MODEL_PROVIDER == "gemini":
-    MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+    MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
     API_KEY = os.getenv("GEMINI_API_KEY", "")
     MODEL_BASE_URL = os.getenv(
         "GEMINI_BASE_URL",
