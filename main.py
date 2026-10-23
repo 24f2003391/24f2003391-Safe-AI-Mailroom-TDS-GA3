@@ -305,7 +305,11 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "profile": PROFILE}
+    return {
+        "status": "ok",
+        "profile": PROFILE,
+        "database": "postgresql" if DATABASE_URL else "sqlite",
+    }
 
 
 @app.post("/")
