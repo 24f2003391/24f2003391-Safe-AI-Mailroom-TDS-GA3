@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -82,17 +83,38 @@ def fail(status: int, message: str):
 
 
 def validate_dossier(d: Any) -> bool:
-    if not isinstance(d, dict) or not isinstance(d.get("dossierId"), str):
+    # Validate the complete envelope before any model work. Keep the accepted
+    # schema aligned with the website contract while allowing future metadata.
+    if not isinstance(d, dict):
+        return False
+    for key in ("dossierId", "partition", "receivedAt", "mailbox", "objective"):
+        if not isinstance(d.get(key), str) or not d[key] or len(d[key]) > 10000:
+            return False
+    if d["partition"] not in {"stable_core", "fresh_audit"}:
         return False
     sources = d.get("sources")
-    if not isinstance(sources, list):
+    if not isinstance(sources, list) or len(sources) > 100:
         return False
     seen = set()
+    total_lines = 0
     for source in sources:
-        if not isinstance(source, dict) or not isinstance(source.get("lines"), list):
+        if not isinstance(source, dict):
             return False
-        for line in source["lines"]:
-            if not isinstance(line, dict) or not isinstance(line.get("lineId"), str) or not isinstance(line.get("text"), str):
+        for key in ("sourceId", "kind", "provenance", "title"):
+            if not isinstance(source.get(key), str) or len(source[key]) > 20000:
+                return False
+        lines = source.get("lines")
+        if not isinstance(lines, list):
+            return False
+        total_lines += len(lines)
+        if total_lines > 2000:
+            return False
+        for line in lines:
+            if not isinstance(line, dict):
+                return False
+            if not isinstance(line.get("lineId"), str) or not line["lineId"] or len(line["lineId"]) > 512:
+                return False
+            if not isinstance(line.get("text"), str) or len(line["text"]) > 50000:
                 return False
             if line["lineId"] in seen:
                 return False
@@ -163,7 +185,7 @@ async def model_proposal(dossier: dict) -> dict:
     if not API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     prompt = {"dossier": dossier, "allowedActions": sorted(ACTIONS)}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=5.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=4.0)) as client:
         response = await client.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
@@ -258,10 +280,33 @@ async def propose(body: dict):
     evaluation_id = body.get("evaluationId")
     dossiers = body.get("dossiers")
     verifier = body.get("receiptVerifier")
-    if not isinstance(evaluation_id, str) or not evaluation_id or not isinstance(dossiers, list) or not isinstance(verifier, dict):
-        raise ValueError("missing evaluationId, dossiers, or receiptVerifier")
-    if verifier.get("algorithm") != "Ed25519" or not isinstance(verifier.get("publicKeyJwk"), dict):
+    corpus = body.get("corpus")
+    allowed = body.get("allowedActions")
+    if not isinstance(evaluation_id, str) or not evaluation_id or len(evaluation_id) > 512:
+        raise ValueError("invalid evaluationId")
+    if not isinstance(dossiers, list) or not dossiers or len(dossiers) > 100:
+        raise ValueError("dossiers must be a non-empty bounded list")
+    if not isinstance(verifier, dict) or verifier.get("algorithm") != "Ed25519":
         raise ValueError("invalid receipt verifier")
+    jwk = verifier.get("publicKeyJwk")
+    if not isinstance(jwk, dict) or set(jwk) != {"kty", "crv", "x"} or jwk.get("kty") != "OKP" or jwk.get("crv") != "Ed25519" or not isinstance(jwk.get("x"), str):
+        raise ValueError("invalid Ed25519 publicKeyJwk")
+    try:
+        public_key_bytes = b64url_decode(jwk["x"])
+        if len(public_key_bytes) != 32:
+            raise ValueError("invalid Ed25519 public key length")
+    except Exception:
+        raise ValueError("invalid Ed25519 public key encoding")
+    if not isinstance(corpus, dict):
+        raise ValueError("missing corpus metadata")
+    for key in ("coreId", "auditId"):
+        if not isinstance(corpus.get(key), str) or not corpus[key]:
+            raise ValueError("invalid corpus metadata")
+    for key in ("stableCount", "freshCount"):
+        if not isinstance(corpus.get(key), int) or isinstance(corpus[key], bool) or corpus[key] < 0:
+            raise ValueError("invalid corpus counts")
+    if not isinstance(allowed, list) or set(allowed) != ACTIONS or len(allowed) != len(ACTIONS):
+        raise ValueError("allowedActions must contain each permitted action exactly once")
     if not all(validate_dossier(d) for d in dossiers):
         raise ValueError("malformed dossier schema")
     ids = [d["dossierId"] for d in dossiers]
@@ -275,27 +320,34 @@ async def propose(body: dict):
             if existing["request_fingerprint"] != fingerprint:
                 return fail(409, "evaluationId reused with changed content")
             return JSONResponse(content=json.loads(existing["propose_response"]))
-    proposals = []
-    for dossier in dossiers:
+
+    # Parallelize bounded model work: the contract allows 55 seconds per request,
+    # and sequential per-dossier calls would time out on the 70-case corpus.
+    semaphore = asyncio.Semaphore(12)
+    async def proposal_for(dossier):
         fp = sha256(canonical(dossier))
         with db() as con:
             cached = con.execute("SELECT proposal_json FROM dossier_cache WHERE content_fingerprint=?", (fp,)).fetchone()
         if cached:
             proposal = json.loads(cached["proposal_json"])
         else:
-            try:
-                proposal = await model_proposal(dossier)
-                validate_proposal(proposal, dossier)
-            except Exception as e:
-                # Do not silently fabricate a decision if the model is unavailable or malformed.
-                raise RuntimeError(f"model decision unavailable or invalid: {type(e).__name__}")
+            async with semaphore:
+                try:
+                    proposal = await model_proposal(dossier)
+                    validate_proposal(proposal, dossier)
+                except Exception as e:
+                    raise RuntimeError(f"model decision unavailable or invalid: {type(e).__name__}")
             with db() as con:
                 con.execute("INSERT OR IGNORE INTO dossier_cache(content_fingerprint,proposal_json) VALUES(?,?)", (fp, json.dumps(proposal, separators=(",", ":"), ensure_ascii=False)))
                 row = con.execute("SELECT proposal_json FROM dossier_cache WHERE content_fingerprint=?", (fp,)).fetchone()
                 proposal = json.loads(row["proposal_json"])
-        # Call IDs are deterministic by dossier content and therefore stable across evaluations.
         validate_proposal(proposal, dossier)
-        proposals.append(proposal)
+        return proposal
+
+    proposals = await asyncio.gather(*(proposal_for(d) for d in dossiers))
+    call_ids = [p["callId"] for p in proposals]
+    if len(set(call_ids)) != len(call_ids):
+        raise ValueError("proposal callId collision")
     response = {
         "profile": PROFILE, "evaluationId": evaluation_id, "status": "awaiting_receipts",
         "inputDigest": input_digest, "proposals": proposals,
