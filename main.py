@@ -246,7 +246,7 @@ async def model_proposals(dossiers: list[dict]) -> list[dict]:
     batch_system = SYSTEM_PROMPT + """
 For this request, you receive a list of dossiers. Return one JSON object with a single key "proposals", whose value is a list containing exactly one proposal per input dossier. Each proposal must have exactly dossierId, action, target, payload, evidence. Do not include callId; the server adds a stable callId. Preserve dossier IDs exactly and do not omit any dossier.
 """
-    async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=5.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=5.0)) as client:
         response = await client.post(
             f"{MODEL_BASE_URL.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
