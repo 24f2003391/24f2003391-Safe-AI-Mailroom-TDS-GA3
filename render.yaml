@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: safe-ai-mailroom-tds-ga3
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: DATABASE_PATH
+        value: /opt/render/project/src/mailroom.sqlite3
