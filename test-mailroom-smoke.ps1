@@ -33,8 +33,16 @@ try {
 }
 try {
     $body = @{ profile = "wrong-profile"; operation = "propose" } | ConvertTo-Json -Compress
-    $response = Invoke-WebRequest -Method Post -Uri "$BaseUrl/" -ContentType "application/json" -Body $body -SkipHttpErrorCheck -TimeoutSec 20
-    Assert-Equal "invalid profile returns 422" ([int]$response.StatusCode) 422
+    try {
+        $response = Invoke-WebRequest -Method Post -Uri "$BaseUrl/" -ContentType "application/json" -Body $body -TimeoutSec 20
+        $status = [int]$response.StatusCode
+    } catch {
+        $status = 0
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $status = [int]$_.Exception.Response.StatusCode
+        }
+    }
+    Assert-Equal "invalid profile returns 422" $status 422
 } catch {
     Write-Host "[FAIL] invalid envelope test: $($_.Exception.Message)" -ForegroundColor Red
     $failures++
