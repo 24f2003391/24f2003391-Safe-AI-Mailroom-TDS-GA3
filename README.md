@@ -1,33 +1,21 @@
 # Safe AI Mailroom — TDS GA3
 
-A FastAPI service for the `ga5-mailroom-action-gate/v2` propose/commit protocol.
+Public HTTPS endpoint for the `ga5-mailroom-action-gate/v2` propose/commit protocol.
 
 ## Deploy on Render
 
-1. Push this repository to GitHub.
-2. In Render, choose **New → Blueprint** and select this repository. Render reads `render.yaml`.
-3. Set `OPENAI_API_KEY` in the service environment. Do not put the key in GitHub or in the submitted endpoint URL.
-4. Deploy, then check `https://YOUR-SERVICE.onrender.com/health`.
-5. Submit the service base URL (no credentials, query string, or fragment). The POST endpoint is `/`.
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Required environment variables: `OPENAI_API_KEY`, `DATABASE_URL` (PostgreSQL connection URL), optional `OPENAI_MODEL` (defaults to `gpt-4o-mini`).
+- The service supports PostgreSQL through psycopg and keeps SQLite as a local-development fallback when `DATABASE_URL` is unset.
+- Mailroom tables are prefixed `mailroom_` so this app can share the existing Render Postgres instance with a separate app without colliding with its tables.
 
-## Local run
+## Configure the existing Render PostgreSQL instance
 
-```bash
-python -m venv .venv
-# Windows: .venv\\Scripts\\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-export OPENAI_API_KEY="your-key"
-uvicorn main:app --reload --port 8000
-```
+The workspace's free-tier limit permits only one active free Postgres instance. Use the existing instance `a2a-invoice-agent-ga3-db`, but **do not drop, rename, or alter the invoice agent's tables**. In Render Dashboard, open that database, copy its **Internal Database URL**, then open the `safe-ai-mailroom-tds-ga3` web service → Environment and add `DATABASE_URL` with that URL. Keep the value secret; do not paste it into chat or commit it to GitHub. The two apps use separate table names.
 
-## Important implementation notes
+After setting `DATABASE_URL`, redeploy the web service. Existing SQLite records will not be migrated automatically; this is acceptable before grader use, but don't switch backends after graded evaluations begin unless you plan a migration.
 
-- Request hashing uses recursively key-sorted compact UTF-8 JSON.
-- Decisions are cached by canonical dossier content.
-- Proposal and evaluation state, plus terminal commits, are stored in SQLite.
-- Commit verifies the supplied Ed25519 signature and exact receipt scope before storing any outcomes.
-- The model is asked to return one constrained JSON proposal; application code validates action schema and evidence IDs.
-- No outbound email or external business action is performed. A verified accepted receipt records the grader's authorized outcome.
+## Test
 
-**Durability note:** SQLite on a free Render web service's local filesystem may be lost when the instance is replaced. For strict durable-state marks, use a persistent disk or managed PostgreSQL and adapt the storage layer before final Save. The free service filesystem is not a substitute for durable storage.
+Run `powershell -ExecutionPolicy Bypass -File .\\test-mailroom-smoke.ps1` after deployment. The test is synthetic and does not consume a graded Check/Save.
