@@ -13,5 +13,5 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-4o-mini
-      - key: DATABASE_PATH
-        value: /opt/render/project/src/mailroom.sqlite3
+      - key: DATABASE_URL
+        sync: false
