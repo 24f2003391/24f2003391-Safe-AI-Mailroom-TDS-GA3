@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from typing import Any
 
 import httpx
+import psycopg
+from psycopg.rows import dict_row
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -21,7 +23,7 @@ ACTIONS = {
     "request_confirmation", "quarantine_item", "no_action",
 }
 MAX_BODY = 5 * 1024 * 1024
-DB_PATH = os.getenv("DATABASE_PATH", "mailroom.sqlite3")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()\nDB_PATH = os.getenv("DATABASE_PATH", "mailroom.sqlite3")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 API_KEY = os.getenv("OPENAI_API_KEY", "")
 
@@ -40,12 +42,47 @@ def b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
+class PostgresCompat:
+    """Small adapter for the existing SQLite-style SQL used by this service."""
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, sql, params=()):
+        statement = sql.strip()
+        ignore_insert = statement.upper().startswith("INSERT OR IGNORE INTO")
+        if ignore_insert:
+            statement = re.sub(r"^INSERT OR IGNORE INTO", "INSERT INTO", statement, flags=re.I)
+            statement += " ON CONFLICT DO NOTHING"
+        statement = statement.replace("?", "%s")
+        statement = re.sub(r"^BEGIN IMMEDIATE$", "BEGIN", statement, flags=re.I)
+        return self.connection.execute(statement, params)
+
+    def executescript(self, script):
+        for statement in script.split(";"):
+            if statement.strip():
+                self.execute(statement)
+
+    def close(self):
+        self.connection.close()
+
+
 @contextmanager
 def db():
-    con = sqlite3.connect(DB_PATH, timeout=20, isolation_level=None)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout=20000")
-    con.execute("PRAGMA journal_mode=WAL")
+    if DATABASE_URL:
+        # Render's internal PostgreSQL URL is supplied as a secret environment variable.
+        # Use dict rows so the rest of the application can keep named-column access.
+        con = PostgresCompat(psycopg.connect(
+            DATABASE_URL,
+            row_factory=dict_row,
+            autocommit=True,
+            connect_timeout=10,
+        ))
+    else:
+        # SQLite remains convenient for local development and offline unit tests.
+        con = sqlite3.connect(DB_PATH, timeout=20, isolation_level=None)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA busy_timeout=20000")
+        con.execute("PRAGMA journal_mode=WAL")
     try:
         yield con
     finally:
