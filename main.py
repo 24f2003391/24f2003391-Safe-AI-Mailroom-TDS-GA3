@@ -92,21 +92,21 @@ def db():
 def init_db():
     with db() as con:
         con.executescript("""
-        CREATE TABLE IF NOT EXISTS evaluations (
+        CREATE TABLE IF NOT EXISTS mailroom_evaluations (
           evaluation_id TEXT PRIMARY KEY, request_fingerprint TEXT NOT NULL,
           input_digest TEXT NOT NULL, verifier_jwk TEXT NOT NULL,
           propose_response TEXT NOT NULL, created_at REAL NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS proposals (
+        CREATE TABLE IF NOT EXISTS mailroom_proposals (
           evaluation_id TEXT NOT NULL, dossier_id TEXT NOT NULL, call_id TEXT NOT NULL,
           action TEXT NOT NULL, proposal_digest TEXT NOT NULL, proposal_json TEXT NOT NULL,
           PRIMARY KEY(evaluation_id, dossier_id), UNIQUE(evaluation_id, call_id)
         );
-        CREATE TABLE IF NOT EXISTS commits (
+        CREATE TABLE IF NOT EXISTS mailroom_commits (
           evaluation_id TEXT PRIMARY KEY, request_fingerprint TEXT NOT NULL,
           response_json TEXT NOT NULL, created_at REAL NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS dossier_cache (
+        CREATE TABLE IF NOT EXISTS mailroom_dossier_cache (
           content_fingerprint TEXT PRIMARY KEY, proposal_json TEXT NOT NULL
         );
         """)
@@ -379,7 +379,7 @@ async def propose(body: dict):
     input_digest = sha256(canonical(dossiers))
     fingerprint = sha256(canonical(body))
     with db() as con:
-        existing = con.execute("SELECT * FROM evaluations WHERE evaluation_id=?", (evaluation_id,)).fetchone()
+        existing = con.execute("SELECT * FROM mailroom_evaluations WHERE evaluation_id=?", (evaluation_id,)).fetchone()
         if existing:
             if existing["request_fingerprint"] != fingerprint:
                 return fail(409, "evaluationId reused with changed content")
@@ -394,7 +394,7 @@ async def propose(body: dict):
         fp = sha256(canonical(dossier))
         fingerprints[dossier["dossierId"]] = fp
         with db() as con:
-            cached = con.execute("SELECT proposal_json FROM dossier_cache WHERE content_fingerprint=?", (fp,)).fetchone()
+            cached = con.execute("SELECT proposal_json FROM mailroom_dossier_cache WHERE content_fingerprint=?", (fp,)).fetchone()
         if cached:
             proposals_by_id[dossier["dossierId"]] = json.loads(cached["proposal_json"])
         else:
@@ -415,8 +415,8 @@ async def propose(body: dict):
             for dossier, proposal in zip(batch, result):
                 fp = fingerprints[dossier["dossierId"]]
                 with db() as con:
-                    con.execute("INSERT OR IGNORE INTO dossier_cache(content_fingerprint,proposal_json) VALUES(?,?)", (fp, json.dumps(proposal, separators=(",", ":"), ensure_ascii=False)))
-                    row = con.execute("SELECT proposal_json FROM dossier_cache WHERE content_fingerprint=?", (fp,)).fetchone()
+                    con.execute("INSERT OR IGNORE INTO mailroom_dossier_cache(content_fingerprint,proposal_json) VALUES(?,?)", (fp, json.dumps(proposal, separators=(",", ":"), ensure_ascii=False)))
+                    row = con.execute("SELECT proposal_json FROM mailroom_dossier_cache WHERE content_fingerprint=?", (fp,)).fetchone()
                     proposals_by_id[dossier["dossierId"]] = json.loads(row["proposal_json"])
 
     proposals = []
@@ -435,18 +435,18 @@ async def propose(body: dict):
         return fail(413, "successful response would exceed 512 KiB")
     with db() as con:
         con.execute("BEGIN IMMEDIATE")
-        existing = con.execute("SELECT * FROM evaluations WHERE evaluation_id=?", (evaluation_id,)).fetchone()
+        existing = con.execute("SELECT * FROM mailroom_evaluations WHERE evaluation_id=?", (evaluation_id,)).fetchone()
         if existing:
             con.execute("ROLLBACK")
             if existing["request_fingerprint"] != fingerprint:
                 return fail(409, "evaluationId reused with changed content")
             return JSONResponse(content=json.loads(existing["propose_response"]))
-        con.execute("INSERT INTO evaluations VALUES(?,?,?,?,?,?)", (
+        con.execute("INSERT INTO mailroom_evaluations VALUES(?,?,?,?,?,?)", (
             evaluation_id, fingerprint, input_digest,
             json.dumps(verifier["publicKeyJwk"], separators=(",", ":")),
             json.dumps(response, separators=(",", ":"), ensure_ascii=False), time.time()))
         for p in proposals:
-            con.execute("INSERT INTO proposals VALUES(?,?,?,?,?,?)", (
+            con.execute("INSERT INTO mailroom_proposals VALUES(?,?,?,?,?,?)", (
                 evaluation_id, p["dossierId"], p["callId"], p["action"],
                 proposal_digest(p), json.dumps(p, separators=(",", ":"), ensure_ascii=False)))
         con.execute("COMMIT")
@@ -461,17 +461,17 @@ async def commit(body: dict):
         raise ValueError("missing evaluationId, inputDigest, or receipts")
     fingerprint = sha256(canonical(body))
     with db() as con:
-        prior = con.execute("SELECT * FROM commits WHERE evaluation_id=?", (evaluation_id,)).fetchone()
+        prior = con.execute("SELECT * FROM mailroom_commits WHERE evaluation_id=?", (evaluation_id,)).fetchone()
         if prior:
             if prior["request_fingerprint"] != fingerprint:
                 return fail(409, "evaluation already committed with different content")
             return JSONResponse(content=json.loads(prior["response_json"]))
-        ev = con.execute("SELECT * FROM evaluations WHERE evaluation_id=?", (evaluation_id,)).fetchone()
+        ev = con.execute("SELECT * FROM mailroom_evaluations WHERE evaluation_id=?", (evaluation_id,)).fetchone()
         if not ev:
             return fail(409, "unknown evaluation")
         if ev["input_digest"] != input_digest:
             return fail(409, "inputDigest mismatch")
-        proposals = con.execute("SELECT * FROM proposals WHERE evaluation_id=?", (evaluation_id,)).fetchall()
+        proposals = con.execute("SELECT * FROM mailroom_proposals WHERE evaluation_id=?", (evaluation_id,)).fetchall()
         proposal_map = {p["dossier_id"]: p for p in proposals}
         jwk = json.loads(ev["verifier_jwk"])
     if len(receipts) != len(proposal_map):
@@ -510,13 +510,13 @@ async def commit(body: dict):
         return fail(413, "successful response would exceed 512 KiB")
     with db() as con:
         con.execute("BEGIN IMMEDIATE")
-        prior = con.execute("SELECT * FROM commits WHERE evaluation_id=?", (evaluation_id,)).fetchone()
+        prior = con.execute("SELECT * FROM mailroom_commits WHERE evaluation_id=?", (evaluation_id,)).fetchone()
         if prior:
             con.execute("ROLLBACK")
             if prior["request_fingerprint"] != fingerprint:
                 return fail(409, "evaluation already committed with different content")
             return JSONResponse(content=json.loads(prior["response_json"]))
-        con.execute("INSERT INTO commits VALUES(?,?,?,?)", (
+        con.execute("INSERT INTO mailroom_commits VALUES(?,?,?,?)", (
             evaluation_id, fingerprint, json.dumps(response, separators=(",", ":"), ensure_ascii=False), time.time()))
         con.execute("COMMIT")
     return JSONResponse(content=response)
