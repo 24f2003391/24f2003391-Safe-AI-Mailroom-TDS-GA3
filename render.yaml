@@ -1,17 +1,19 @@
 services:
   - type: web
-    name: safe-ai-mailroom-tds-ga3
+    name: safe-ai-mailroom-tds-ga3-or
     runtime: python
     plan: free
-    region: singapore
+    region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      - key: OPENAI_API_KEY
+      - key: MODEL_PROVIDER
+        value: gemini
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: GEMINI_API_KEY
         sync: false
-      - key: OPENAI_MODEL
-        value: gpt-4o-mini
       - key: DATABASE_URL
         sync: false
