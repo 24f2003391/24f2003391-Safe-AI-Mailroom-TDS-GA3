@@ -176,7 +176,9 @@ def validate_proposal(p: Any, dossier: dict, call_id: str | None = None) -> None
     required = {"dossierId", "callId", "action", "target", "payload", "evidence"}
     if set(p) != required:
         raise ValueError("proposal must contain exactly the required fields")
-    if p["dossierId"] != dossier["dossierId"] or p["action"] not in ACTIONS:
+    if (p["dossierId"] != dossier["dossierId"]
+            or not isinstance(p["action"], str)
+            or p["action"] not in ACTIONS):
         raise ValueError("proposal dossier/action mismatch")
     if not isinstance(p["callId"], str) or not re.fullmatch(r"[A-Za-z0-9._:-]{12,128}", p["callId"]):
         raise ValueError("invalid callId")
@@ -532,6 +534,12 @@ async def commit(body: dict):
         return fail(413, "successful response would exceed 512 KiB")
     with db() as con:
         con.execute("BEGIN IMMEDIATE")
+        # PostgreSQL does not have SQLite's BEGIN IMMEDIATE semantics. Serialize
+        # final commit checks per evaluation so concurrent identical requests replay
+        # cleanly and different requests receive a deterministic 409 instead of racing
+        # into a primary-key violation (or a 500 response).
+        if DATABASE_URL:
+            con.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (evaluation_id,))
         prior = con.execute("SELECT * FROM mailroom_commits WHERE evaluation_id=?", (evaluation_id,)).fetchone()
         if prior:
             con.execute("ROLLBACK")
