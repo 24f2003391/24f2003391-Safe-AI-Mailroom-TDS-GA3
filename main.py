@@ -339,7 +339,10 @@ async def handle(request: Request):
         body = json.loads(raw)
     except Exception:
         return fail(400, "malformed JSON")
-    if not isinstance(body, dict) or body.get("profile") != PROFILE or body.get("operation") not in {"propose", "commit"}:
+    if (not isinstance(body, dict)
+            or body.get("profile") != PROFILE
+            or not isinstance(body.get("operation"), str)
+            or body.get("operation") not in {"propose", "commit"}):
         return fail(422, "invalid request envelope")
     try:
         if body["operation"] == "propose":
