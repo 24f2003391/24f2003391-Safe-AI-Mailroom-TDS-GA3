@@ -196,6 +196,7 @@ def validate_proposal(p: Any, dossier: dict, call_id: str | None = None) -> None
     if p["action"] == "no_action":
         if (p["target"] is not None
                 or set(p["payload"]) != {"reasonCode", "referenceId"}
+                or not isinstance(p["payload"]["reasonCode"], str)
                 or p["payload"]["reasonCode"] not in {"ALREADY_COMPLETED", "DUPLICATE", "INFORMATIONAL"}
                 or not isinstance(p["payload"]["referenceId"], str) or not p["payload"]["referenceId"]):
             raise ValueError("invalid no_action shape")
