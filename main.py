@@ -463,6 +463,10 @@ async def propose(body: dict):
         return fail(413, "successful response would exceed 512 KiB")
     with db() as con:
         con.execute("BEGIN IMMEDIATE")
+        # Serialize concurrent propose finalization for this evaluation on PostgreSQL.
+        # SQLite's BEGIN IMMEDIATE already provides the corresponding write lock.
+        if DATABASE_URL:
+            con.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (evaluation_id,))
         existing = con.execute("SELECT * FROM mailroom_evaluations WHERE evaluation_id=?", (evaluation_id,)).fetchone()
         if existing:
             con.execute("ROLLBACK")
