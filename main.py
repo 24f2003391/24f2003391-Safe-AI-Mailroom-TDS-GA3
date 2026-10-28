@@ -419,44 +419,79 @@ async def propose(body: dict):
     proposals_by_id = {}
     uncached = []
     fingerprints = {}
-    for dossier in dossiers:
-        fp = sha256(canonical(dossier))
-        fingerprints[dossier["dossierId"]] = fp
-        with db() as con:
+    cache_lookup_started = time.monotonic()
+    # Reuse one database connection for the entire lookup loop. Opening a fresh
+    # PostgreSQL connection for every dossier adds substantial network latency.
+    with db() as con:
+        for dossier in dossiers:
+            fp = sha256(canonical(dossier))
+            fingerprints[dossier["dossierId"]] = fp
             cached = con.execute("SELECT proposal_json FROM mailroom_dossier_cache WHERE content_fingerprint=?", (fp,)).fetchone()
-        if cached:
-            proposals_by_id[dossier["dossierId"]] = json.loads(cached["proposal_json"])
-        else:
-            uncached.append(dossier)
+            if cached:
+                proposals_by_id[dossier["dossierId"]] = json.loads(cached["proposal_json"])
+            else:
+                uncached.append(dossier)
+    print(
+        f"Mailroom cache lookup: dossiers={len(dossiers)} cached={len(dossiers) - len(uncached)} "
+        f"uncached={len(uncached)} elapsed={time.monotonic() - cache_lookup_started:.2f}s",
+        flush=True,
+    )
 
-    # Keep each model response small enough to remain valid JSON for the full
-    # grader corpus. Five concurrent batches of at most 12 dossiers also avoid
-    # the larger single-call truncation seen with the 58-dossier stable corpus.
+    # Keep each model response bounded to avoid malformed/truncated JSON.
     batch_size = 12
     batches = [uncached[i:i + batch_size] for i in range(0, len(uncached), batch_size)]
     batch_semaphore = asyncio.Semaphore(5)
     async def decide_batch(batch):
-        async with batch_semaphore:
-            try:
-                return await model_proposals(batch)
-            except httpx.HTTPStatusError as e:
-                # Log only the upstream status and a short response excerpt; never log request headers or API keys.
-                detail = (e.response.text or "")[:1000]
-                print(f"Model provider HTTP {e.response.status_code}: {detail}", flush=True)
-                raise RuntimeError(f"model decision unavailable or invalid: HTTP {e.response.status_code}")
-            except Exception as e:
-                print(f"Model decision failed: {type(e).__name__}", flush=True)
-                raise RuntimeError(f"model decision unavailable or invalid: {type(e).__name__}")
+        started = time.monotonic()
+        try:
+            async with batch_semaphore:
+                result = await model_proposals(batch)
+            print(
+                f"Mailroom model batch succeeded: count={len(batch)} elapsed={time.monotonic() - started:.2f}s",
+                flush=True,
+            )
+            return result
+        except httpx.HTTPStatusError as e:
+            # Log only the upstream status and a short response excerpt; never log request headers or API keys.
+            detail = (e.response.text or "")[:1000]
+            print(f"Model provider HTTP {e.response.status_code}: {detail}", flush=True)
+            print(
+                f"Mailroom model batch failed: count={len(batch)} elapsed={time.monotonic() - started:.2f}s "
+                f"error=HTTPStatusError",
+                flush=True,
+            )
+            raise RuntimeError(f"model decision unavailable or invalid: HTTP {e.response.status_code}")
+        except Exception as e:
+            print(f"Model decision failed: {type(e).__name__}", flush=True)
+            print(
+                f"Mailroom model batch failed: count={len(batch)} elapsed={time.monotonic() - started:.2f}s "
+                f"error={type(e).__name__}",
+                flush=True,
+            )
+            raise RuntimeError(f"model decision unavailable or invalid: {type(e).__name__}")
 
     if batches:
         batch_results = await asyncio.gather(*(decide_batch(batch) for batch in batches))
-        for batch, result in zip(batches, batch_results):
-            for dossier, proposal in zip(batch, result):
-                fp = fingerprints[dossier["dossierId"]]
-                with db() as con:
-                    con.execute("INSERT OR IGNORE INTO mailroom_dossier_cache(content_fingerprint,proposal_json) VALUES(?,?)", (fp, json.dumps(proposal, separators=(",", ":"), ensure_ascii=False)))
-                    row = con.execute("SELECT proposal_json FROM mailroom_dossier_cache WHERE content_fingerprint=?", (fp,)).fetchone()
+        # Persist all newly generated proposals while reusing one database connection.
+        cache_write_started = time.monotonic()
+        with db() as con:
+            for batch, result in zip(batches, batch_results):
+                for dossier, proposal in zip(batch, result):
+                    fp = fingerprints[dossier["dossierId"]]
+                    con.execute(
+                        "INSERT OR IGNORE INTO mailroom_dossier_cache(content_fingerprint,proposal_json) VALUES(?,?)",
+                        (fp, json.dumps(proposal, separators=(",", ":"), ensure_ascii=False)),
+                    )
+                    row = con.execute(
+                        "SELECT proposal_json FROM mailroom_dossier_cache WHERE content_fingerprint=?",
+                        (fp,),
+                    ).fetchone()
                     proposals_by_id[dossier["dossierId"]] = json.loads(row["proposal_json"])
+        print(
+            f"Mailroom cache write: proposals={sum(len(x) for x in batches)} "
+            f"elapsed={time.monotonic() - cache_write_started:.2f}s",
+            flush=True,
+        )
 
     proposals = []
     for dossier in dossiers:
