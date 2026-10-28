@@ -440,35 +440,66 @@ async def propose(body: dict):
     # Keep each model response bounded to avoid malformed/truncated JSON.
     batch_size = 12
     batches = [uncached[i:i + batch_size] for i in range(0, len(uncached), batch_size)]
-    batch_semaphore = asyncio.Semaphore(5)
+    batch_semaphore = asyncio.Semaphore(2)
     async def decide_batch(batch):
         started = time.monotonic()
-        try:
-            async with batch_semaphore:
-                result = await model_proposals(batch)
-            print(
-                f"Mailroom model batch succeeded: count={len(batch)} elapsed={time.monotonic() - started:.2f}s",
-                flush=True,
-            )
-            return result
-        except httpx.HTTPStatusError as e:
-            # Log only the upstream status and a short response excerpt; never log request headers or API keys.
-            detail = (e.response.text or "")[:1000]
-            print(f"Model provider HTTP {e.response.status_code}: {detail}", flush=True)
-            print(
-                f"Mailroom model batch failed: count={len(batch)} elapsed={time.monotonic() - started:.2f}s "
-                f"error=HTTPStatusError",
-                flush=True,
-            )
-            raise RuntimeError(f"model decision unavailable or invalid: HTTP {e.response.status_code}")
-        except Exception as e:
-            print(f"Model decision failed: {type(e).__name__}", flush=True)
-            print(
-                f"Mailroom model batch failed: count={len(batch)} elapsed={time.monotonic() - started:.2f}s "
-                f"error={type(e).__name__}",
-                flush=True,
-            )
-            raise RuntimeError(f"model decision unavailable or invalid: {type(e).__name__}")
+        # Retry transient provider outages and malformed model output. Keep concurrency
+        # low to reduce bursts against Gemini's free-tier capacity.
+        for attempt in range(1, 4):
+            try:
+                async with batch_semaphore:
+                    result = await model_proposals(batch)
+                print(
+                    f"Mailroom model batch succeeded: count={len(batch)} "
+                    f"attempt={attempt} elapsed={time.monotonic() - started:.2f}s",
+                    flush=True,
+                )
+                return result
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                detail = (e.response.text or "")[:1000]
+                transient = status in {408, 429, 500, 502, 503, 504}
+                if transient and attempt < 3:
+                    delay = 2 ** attempt
+                    print(
+                        f"Mailroom model batch retry: count={len(batch)} attempt={attempt} "
+                        f"provider_status={status} delay={delay}s",
+                        flush=True,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                print(f"Model provider HTTP {status}: {detail}", flush=True)
+                print(
+                    f"Mailroom model batch failed: count={len(batch)} "
+                    f"elapsed={time.monotonic() - started:.2f}s error=HTTPStatusError",
+                    flush=True,
+                )
+                raise RuntimeError(f"model decision unavailable or invalid: HTTP {status}")
+            except (ValueError, KeyError, httpx.TimeoutException, httpx.TransportError) as e:
+                if attempt < 3:
+                    delay = 2 ** attempt
+                    print(
+                        f"Mailroom model batch retry: count={len(batch)} attempt={attempt} "
+                        f"error={type(e).__name__} delay={delay}s",
+                        flush=True,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                print(f"Model decision failed after retries: {type(e).__name__}", flush=True)
+                print(
+                    f"Mailroom model batch failed: count={len(batch)} "
+                    f"elapsed={time.monotonic() - started:.2f}s error={type(e).__name__}",
+                    flush=True,
+                )
+                raise RuntimeError(f"model decision unavailable or invalid: {type(e).__name__}")
+            except Exception as e:
+                print(f"Model decision failed: {type(e).__name__}", flush=True)
+                print(
+                    f"Mailroom model batch failed: count={len(batch)} "
+                    f"elapsed={time.monotonic() - started:.2f}s error={type(e).__name__}",
+                    flush=True,
+                )
+                raise RuntimeError(f"model decision unavailable or invalid: {type(e).__name__}")
 
     if batches:
         batch_results = await asyncio.gather(*(decide_batch(batch) for batch in batches))
