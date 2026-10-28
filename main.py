@@ -429,11 +429,12 @@ async def propose(body: dict):
         else:
             uncached.append(dossier)
 
-    # Gemini free-tier quotas are request-per-minute limited. Send all uncached
-    # dossiers in one model call instead of firing many concurrent batches; the
-    # grader allows 55 seconds per request, so keep the provider timeout below it.
-    batches = [uncached] if uncached else []
-    batch_semaphore = asyncio.Semaphore(1)
+    # Keep each model response small enough to remain valid JSON for the full
+    # grader corpus. Five concurrent batches of at most 12 dossiers also avoid
+    # the larger single-call truncation seen with the 58-dossier stable corpus.
+    batch_size = 12
+    batches = [uncached[i:i + batch_size] for i in range(0, len(uncached), batch_size)]
+    batch_semaphore = asyncio.Semaphore(5)
     async def decide_batch(batch):
         async with batch_semaphore:
             try:
