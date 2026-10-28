@@ -373,9 +373,16 @@ async def propose(body: dict):
     if not isinstance(jwk, dict) or set(jwk) != {"kty", "crv", "x"} or jwk.get("kty") != "OKP" or jwk.get("crv") != "Ed25519" or not isinstance(jwk.get("x"), str):
         raise ValueError("invalid Ed25519 publicKeyJwk")
     try:
-        public_key_bytes = b64url_decode(jwk["x"])
-        if len(public_key_bytes) != 32:
-            raise ValueError("invalid Ed25519 public key length")
+        # An Ed25519 public key is 32 bytes, encoded as exactly 43 unpadded
+        # Base64URL characters. Reject non-canonical encodings instead of relying
+        # on Python's permissive URL-safe decoder.
+        encoded_key = jwk["x"]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", encoded_key):
+            raise ValueError("invalid Base64URL alphabet or length")
+        public_key_bytes = b64url_decode(encoded_key)
+        canonical_key = base64.urlsafe_b64encode(public_key_bytes).decode("ascii").rstrip("=")
+        if len(public_key_bytes) != 32 or canonical_key != encoded_key:
+            raise ValueError("invalid Ed25519 public key encoding")
     except Exception:
         raise ValueError("invalid Ed25519 public key encoding")
     if not isinstance(corpus, dict):
