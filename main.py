@@ -438,10 +438,10 @@ async def propose(body: dict):
     )
 
     # Keep each model response bounded to avoid malformed/truncated JSON.
-    batch_size = 12
+    batch_size = 3
     batches = [uncached[i:i + batch_size] for i in range(0, len(uncached), batch_size)]
     batch_semaphore = asyncio.Semaphore(2)
-    async def decide_batch(batch):
+    async def decide_batch(batch, allow_split=True):
         started = time.monotonic()
         # Retry transient provider outages and malformed model output. Keep concurrency
         # low to reduce bursts against Gemini's free-tier capacity.
@@ -491,6 +491,21 @@ async def propose(body: dict):
                     f"elapsed={time.monotonic() - started:.2f}s error={type(e).__name__}",
                     flush=True,
                 )
+                # A malformed or semantically invalid multi-dossier response should
+                # not fail the entire evaluation. Split it recursively, down to one
+                # dossier per model call, while preserving the original dossier order.
+                if allow_split and len(batch) > 1 and isinstance(e, (ValueError, KeyError)):
+                    midpoint = len(batch) // 2
+                    print(
+                        f"Mailroom model batch fallback: splitting count={len(batch)} "
+                        f"into={midpoint}+{len(batch) - midpoint}",
+                        flush=True,
+                    )
+                    left, right = await asyncio.gather(
+                        decide_batch(batch[:midpoint], allow_split=True),
+                        decide_batch(batch[midpoint:], allow_split=True),
+                    )
+                    return left + right
                 raise RuntimeError(f"model decision unavailable or invalid: {type(e).__name__}")
             except Exception as e:
                 print(f"Model decision failed: {type(e).__name__}", flush=True)
