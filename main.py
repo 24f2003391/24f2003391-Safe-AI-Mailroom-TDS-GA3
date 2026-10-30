@@ -438,7 +438,7 @@ async def propose(body: dict):
     )
 
     # Keep each model response bounded to avoid malformed/truncated JSON.
-    batch_size = 3
+    batch_size = 8
     batches = [uncached[i:i + batch_size] for i in range(0, len(uncached), batch_size)]
     batch_semaphore = asyncio.Semaphore(2)
     async def decide_batch(batch, allow_split=True):
